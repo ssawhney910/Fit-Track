@@ -1165,7 +1165,7 @@ function openSettings(){
   <div><div class="lbl" style="margin-bottom:6px">Default rest timer</div><div class="seg">${rest.map(r=>`<button data-act="restset" data-v="${r}" aria-pressed="${S.app.rest===r}">${r}s</button>`).join('')}</div></div>
   <div><div class="lbl" style="margin-bottom:6px">Where your data lives</div><p class="note" style="margin:0">${Store.mode==='cloud'?'Your logs are stored privately in your account and open on any device where you sign in. Nobody you share this page with can see them.':'Your logs are saved on this phone only. Installed to the home screen they stay put, but clearing browser data or deleting the app erases them. Export to Excel every week.'}</p></div>
   <div><div class="lbl" style="margin-bottom:6px">Backup${S.app.lastBackup?' · last '+DW(S.app.lastBackup):' · never'}</div><div class="row-btns"><button class="btn soft" data-act="exportx">Export Excel</button><button class="btn soft" data-act="export">Backup file</button><button class="btn ghost" data-act="restore">Restore</button></div><input type="file" id="restorefile" accept=".json,application/json" hidden></div>
-  <div><div class="lbl" style="margin-bottom:6px">Bulk import</div><div class="row-btns"><button class="btn soft" data-act="csvpick">Import history (CSV)</button><button class="btn ghost" data-act="csvtpl">Template</button>${S.sessions.some(s=>s.csv)?'<button class="btn ghost" data-act="csvrm">Remove CSV imports</button>':''}</div><input type="file" id="csvfile" accept=".csv,text/csv,text/plain" hidden><p class="note" style="margin:6px 0 0">Works with this app's template and with Strong or Hevy exports. You choose how each exercise maps.</p></div>
+  <div><div class="lbl" style="margin-bottom:6px">Bulk import</div><div class="row-btns"><button class="btn soft" data-act="csvpick">Import history</button><button class="btn ghost" data-act="csvtpl">Template</button>${S.sessions.some(s=>s.csv)?'<button class="btn ghost" data-act="csvrm">Remove CSV imports</button>':''}</div><input type="file" id="csvfile" accept=".csv,.xlsx,.xls,text/csv,text/plain,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" multiple hidden><p class="note" style="margin:6px 0 0">CSV or Excel, several files at once. Reads Legend, Strong and Hevy exports and this app's template. You can change how each exercise maps before importing.</p></div>
   <div><div class="lbl" style="margin-bottom:6px">Your plan</div><div class="row-btns"><button class="btn ghost" data-act="restoreplan">Restore missing plan days</button>${S.sessions.some(s=>s.imp)?'<button class="btn ghost" data-act="rmimport">Remove imported logs</button>':'<button class="btn ghost" data-act="import">Import Oct 12-15 logs</button>'}</div></div>
   <div><button class="btn danger" data-act="erase">Erase all my data</button></div>
   <button class="btn wide" data-act="closesheet">Done</button></div>`);
@@ -1373,7 +1373,7 @@ Store.loadLocal();
 if(ensurePlan())Store.saveLocal();
 if(S.draft)UI.tab='train';
 render();
-/* ---------- CSV bulk import ---------- */
+/* ---------- bulk import: CSV and Excel, several files at once ---------- */
 async function saveFile(name,data,mime){
   try{
     if(window.claude&&window.claude.use){const dl=await window.claude.use('downloads');if(dl){await dl.save({filename:name,data});return 'ok'}}
@@ -1404,11 +1404,34 @@ function parseCSV(t){
   if(c!==''||r.length)endRow();
   return rows;
 }
+async function loadXlsxLib(){
+  if(typeof XLSX!=='undefined')return true;
+  return new Promise(res=>{const s=document.createElement('script');s.src='https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.mini.min.js';s.onload=()=>res(typeof XLSX!=='undefined');s.onerror=()=>res(false);document.head.appendChild(s)});
+}
+async function xlsxSheets(file){
+  if(!await loadXlsxLib())throw new Error('Excel files could not be read here. Save the sheet as CSV and import that instead.');
+  const wb=XLSX.read(await file.arrayBuffer(),{type:'array',cellDates:true}),p2=n=>String(n).padStart(2,'0');
+  const cell=v=>{
+    if(v instanceof Date){const d=new Date(v.getTime()+30000);const h=d.getHours(),m=d.getMinutes(),ds=d.getFullYear()+'-'+p2(d.getMonth()+1)+'-'+p2(d.getDate());return h||m?ds+' '+p2(h)+':'+p2(m):ds}
+    return v==null?'':String(v);
+  };
+  return wb.SheetNames.map(n=>({name:n,rows:XLSX.utils.sheet_to_json(wb.Sheets[n],{header:1,raw:true,defval:''}).map(r=>r.map(cell)).filter(r=>r.some(x=>x.trim()!==''))}));
+}
 function csvCols(h){
   const L=h.map(x=>String(x).toLowerCase().trim());
   const f=(...re)=>{for(const r of re){const i=L.findIndex(x=>r.test(x));if(i>=0)return i}return -1};
-  return {date:f(/^date$/,/start_?time/,/date/,/^day$/),work:f(/^workout( name)?$/,/^title$/,/session/,/workout/),ex:f(/^exercise( name| title)?$/,/exercise_?title/,/exercise/,/^lift$/,/movement/),
-    set:f(/^set( order| index)?$/,/set_?index/),wt:f(/weight/,/^load$/),reps:f(/^reps?$/,/reps/,/repetitions/),sec:f(/^seconds$/,/duration_?seconds/),warm:f(/warm/,/set_?type/)};
+  const date=f(/^date$/,/^start_?time$/,/date/,/^day$/);
+  const lg=L.includes('time_seconds');
+  return {date,
+    stime:L[date]==='date'?f(/^start_?time$/):-1,
+    work:f(/^workout_?name$/,/^workout( name)?$/,/^title$/,/^routine_?name$/,/session/),
+    ex:f(/^exercise_?name$/,/^exercise( name| title)?$/,/^exercise_?title$/,/^lift$/,/^movement$/),
+    wt:f(/^display_weight_lb/,/^display_weight/,/^weight/,/^load$/),
+    reps:f(/^reps?$/,/^repetitions$/),
+    sec:lg?f(/^time_seconds$/):f(/^seconds$/,/^duration_seconds$/),
+    dur:lg?f(/^duration_seconds$/):-1,
+    warm:f(/warm/,/^set_?type$/),
+    body:f(/^body_weight/),asst:f(/^assisted_weight/),type:f(/^exercise_type$/),excl:f(/^is_excluded$/),mg:f(/^muscle_group$/)};
 }
 function csvDate(s){
   s=String(s).trim();let m;
@@ -1422,8 +1445,11 @@ function csvDate(s){
   const d=new Date(t);if(!/\d:\d/.test(s))d.setHours(18,0,0,0);return d.getTime();
 }
 const csvNum=v=>{const n=parseFloat(String(v==null?'':v).replace(',','.').replace(/[^0-9.\-]/g,''));return isFinite(n)?n:0};
-const SYN={db:'dumbbell',dumbbells:'dumbbell',dumbell:'dumbbell',bb:'barbell',barbells:'barbell',kb:'kettlebell',bw:'bodyweight',ez:'ez',smith:'smith'};
-const nkToks=s=>new Set(String(s).toLowerCase().replace(/[^a-z0-9 ]/g,' ').split(/\s+/).filter(Boolean).map(w=>SYN[w]||(w.length>3&&w.endsWith('s')&&!w.endsWith('ss')?w.slice(0,-1):w)));
+const SYN={db:'dumbbell',dumbbells:'dumbbell',dumbell:'dumbbell',bb:'barbell',barbells:'barbell',kb:'kettlebell',bw:'bodyweight',stright:'straight',tricep:'tricep',triceps:'tricep',bicep:'bicep',biceps:'bicep'};
+const nkToks=s=>{
+  s=String(s).toLowerCase().replace(/\b(pull|push|chin|step|sit|pull)[\s-]+(down|up)\b/g,'$1$2').replace(/[^a-z0-9 ]/g,' ');
+  return new Set(s.split(/\s+/).filter(Boolean).map(w=>SYN[w]||(w.length>3&&w.endsWith('s')&&!w.endsWith('ss')?w.slice(0,-1):w)));
+};
 function csvMatch(name){
   const a=nkToks(name);if(!a.size)return null;
   let best=null,bs=0;
@@ -1434,57 +1460,88 @@ function csvMatch(name){
   }
   return bs>=0.6?best:null;
 }
-function csvBuild(text){
-  const rows=parseCSV(text);
-  if(rows.length<2)throw new Error('The file has no data rows.');
+function csvHint(name,mg){
+  const n=String(name).toLowerCase(),g=String(mg||'').toLowerCase();
+  if(g==='cardio')return 'cardio';
+  if(g==='shoulders'){if(/reverse|face pull|rear/.test(n))return 'Rear delts';if(/shrug/.test(n))return 'Traps';if(/press/.test(n))return 'Front delts';return 'Side delts'}
+  if(g==='back'){if(/shrug/.test(n))return 'Traps';return 'Lats'}
+  const M={chest:'Chest',triceps:'Triceps',biceps:'Biceps',abs:'Abs',core:'Abs',legs:'Quads',quads:'Quads',glutes:'Glutes',hamstrings:'Hamstrings',calves:'Calves',forearms:'Forearms',traps:'Traps',lats:'Lats'};
+  return M[g]||null;
+}
+function csvBuild(rows){
+  if(rows.length<2)throw new Error('no data rows');
   const C=csvCols(rows[0]);
-  if(C.date<0||C.ex<0)throw new Error('Could not find Date and Exercise columns in the header row.');
-  const hdr=rows[0].join(' ').toLowerCase();
-  const unit=/\bkg\b|kilo/.test(hdr)?'kg':/\blbs?\b|pound/.test(hdr)?'lb':null;
+  if(C.date<0||C.ex<0)throw new Error('no Date and Exercise columns');
+  const hdr=rows[0].join(',').toLowerCase();
+  const unit=/(^|[^a-z])kgs?([^a-z]|$)|kilo/.test(hdr)?'kg':/(^|[^a-z])(lbs?|pounds?)([^a-z]|$)/.test(hdr)?'lb':null;
   const G={},order=[],names={};let bad=0,rowsOk=0;
   rows.slice(1).forEach(r=>{
-    const t=csvDate(r[C.date]),exn=String(r[C.ex]||'').trim();
+    if(C.excl>=0&&/^(true|1|yes)$/i.test(String(r[C.excl]).trim()))return;
+    let ds=String(r[C.date]||'').trim();if(C.stime>=0&&r[C.stime]&&!/\d:\d/.test(ds))ds+=' '+String(r[C.stime]).trim();
+    const t=csvDate(ds),exn=String(r[C.ex]||'').trim();
     if(isNaN(t)||!exn){bad++;return}
+    const bw=C.type>=0&&/bodyweight/i.test(String(r[C.type]));
     let w=C.wt>=0?csvNum(r[C.wt]):0,reps=C.reps>=0?csvNum(r[C.reps]):0;
+    if(bw){const a=C.asst>=0?csvNum(r[C.asst]):0;w=a>0?a:Math.max(0,w-(C.body>=0?csvNum(r[C.body]):0))}
     const sec=C.sec>=0?csvNum(r[C.sec]):0;
-    if(!reps&&sec)reps=-sec;           // negative marks "seconds", resolved after mapping
+    if(!reps&&sec)reps=-sec;
     if(!reps&&!w)return;
-    const wu=C.warm>=0&&/^(y|yes|true|1|w|warm.?up)$/i.test(String(r[C.warm]||'').trim());
+    const wu=C.warm>=0&&(/^(y|yes|true|1|w)$/i.test(String(r[C.warm]||'').trim())||/warm/i.test(String(r[C.warm]||'')));
     const d=new Date(t),dk=d.getFullYear()*10000+(d.getMonth()+1)*100+d.getDate(),wn=(C.work>=0&&String(r[C.work]||'').trim())||'Imported workout';
     const key=dk+'|'+wn.toLowerCase();
-    let g=G[key];if(!g){g=G[key]={key,dk,t,name:wn,ex:[],ix:{}};order.push(key)}
+    let g=G[key];if(!g){g=G[key]={key,dk,t,name:wn,u:unit,dur:C.dur>=0?csvNum(r[C.dur]):0,ex:[],ix:{}};order.push(key)}
     let e=g.ix[exn];if(!e){e=g.ix[exn]={name:exn,sets:[]};g.ex.push(e)}
     e.sets.push({w,r:reps,wu});
-    const nn=names[exn]=names[exn]||{sets:0};nn.sets++;rowsOk++;
+    const nn=names[exn]=names[exn]||{sets:0,hint:C.mg>=0?csvHint(exn,r[C.mg]):null};nn.sets++;rowsOk++;
   });
-  if(!order.length)throw new Error('No usable rows found. Check the date format and that each row has reps or weight.');
-  Object.keys(names).forEach(n=>{names[n].map=csvMatch(n)});
-  return {groups:order.map(k=>G[k]),names,unit:unit||U(),fileUnit:unit,bad,rowsOk};
+  if(!order.length)throw new Error('no usable rows (check the date format and that rows have reps, time or weight)');
+  return {groups:order.map(k=>G[k]),names,bad,rowsOk,unit};
+}
+function csvDefault(name,n){
+  const id=csvMatch(name);if(id)return {id,sel:'e:'+id,matched:true};
+  if(n.hint==='cardio')return {id:null,sel:'e:cardio',matched:false};
+  if(n.hint)return {id:null,sel:'n:'+n.hint,matched:false};
+  return {id:null,sel:'s',matched:false};
 }
 function csvSheet(){
   const c=UI.csv;if(!c)return;
-  const keys=Object.keys(c.names).sort((a,b)=>(c.names[a].map?1:0)-(c.names[b].map?1:0)||a.localeCompare(b));
+  const keys=Object.keys(c.names).sort((a,b)=>(c.names[a].matched?1:0)-(c.names[b].matched?1:0)||a.localeCompare(b));
   const lib=allEx().slice().sort((a,b)=>a.n.localeCompare(b.n));
   const opts=sel=>`<option value="s"${sel==='s'?' selected':''}>Skip these sets</option><optgroup label="Create new, main muscle">${MUSCLES.map(m=>`<option value="n:${m.k}"${sel==='n:'+m.k?' selected':''}>${m.k}</option>`).join('')}</optgroup><optgroup label="Match to an exercise">${lib.map(x=>`<option value="e:${x.id}"${sel==='e:'+x.id?' selected':''}>${esc(x.n)}</option>`).join('')}</optgroup>`;
-  const unm=keys.filter(k=>!c.names[k].map).length;
+  const unm=keys.filter(k=>!c.names[k].matched).length;
   const skipSets=keys.reduce((a,k)=>a+((c.map[k]==='s')?c.names[k].sets:0),0);
-  const dates=c.groups.map(g=>g.t);
+  const dates=c.groups.map(g=>g.t),undet=c.groups.some(g=>!g.u);
   showSheet(`<h2 style="margin-bottom:6px">Import history</h2>
-  <p class="note" style="margin:0 0 12px">${c.groups.length} workouts, ${c.rowsOk} sets, ${D(Math.min(...dates),{month:'short',day:'numeric',year:'numeric'})} to ${D(Math.max(...dates),{month:'short',day:'numeric',year:'numeric'})}.${c.bad?' '+c.bad+' rows were skipped (no date or exercise).':''}</p>
+  <p class="note" style="margin:0 0 6px">${c.groups.length} workouts, ${c.rowsOk} sets, ${D(Math.min(...dates),{month:'short',day:'numeric',year:'numeric'})} to ${D(Math.max(...dates),{month:'short',day:'numeric',year:'numeric'})}.${c.bad?' '+c.bad+' rows had no date or exercise and were skipped.':''}</p>
+  <div class="note" style="margin:0 0 12px">${c.files.map(f=>`<div>${f.ok?'✓':'✗'} ${esc(f.name)}${f.ok?' · '+f.workouts+' workouts':' · '+esc(f.msg)}</div>`).join('')}${c.dupFiles?`<div>${c.dupFiles} duplicate workouts across files were merged.</div>`:''}</div>
   <div class="stack">
-  <div><div class="lbl" style="margin-bottom:6px">Weights in the file are in${c.fileUnit?' (read from the header)':''}</div><div class="seg"><button data-act="csvunit" data-u="kg" aria-pressed="${c.unit==='kg'}">Kilograms</button><button data-act="csvunit" data-u="lb" aria-pressed="${c.unit==='lb'}">Pounds</button></div></div>
-  <div><div class="lbl" style="margin-bottom:6px">Exercises${unm?' · '+unm+' need a match':''}</div><div class="csvmap">${keys.map(k=>{const n=c.names[k],cur=c.map[k];return `<div class="csvrow${n.map?'':' unm'}"><div><b>${esc(k)}</b><small>${n.sets} sets${n.map?'':' · not recognised'}</small></div><select class="inp" data-csvmap="${esc(k)}" aria-label="Map ${esc(k)}">${opts(cur)}</select></div>`}).join('')}</div></div>
+  ${undet?`<div><div class="lbl" style="margin-bottom:6px">Weights without a unit in the header are in</div><div class="seg"><button data-act="csvunit" data-u="kg" aria-pressed="${c.unit==='kg'}">Kilograms</button><button data-act="csvunit" data-u="lb" aria-pressed="${c.unit==='lb'}">Pounds</button></div></div>`:`<p class="note" style="margin:0">Weight units were read from the file headers (${[...new Set(c.groups.map(g=>g.u))].join(', ')}).</p>`}
+  <div><div class="lbl" style="margin-bottom:6px">Exercises${unm?' · '+unm+' not recognised':''}</div><div class="csvmap">${keys.map(k=>{const n=c.names[k],cur=c.map[k];return `<div class="csvrow${n.matched?'':' unm'}"><div><b>${esc(k)}</b><small>${n.sets} sets${n.matched?'':' · new'}</small></div><select class="inp" data-csvmap="${esc(k)}" aria-label="Map ${esc(k)}">${opts(cur)}</select></div>`}).join('')}</div></div>
   ${skipSets?`<p class="note" style="margin:0">${skipSets} sets will be skipped. Pick a match or create a new exercise to keep them.</p>`:''}
   <p class="note" style="margin:0">Importing the same file twice is safe: workouts that already exist are left alone.</p>
   <div class="row-btns"><button class="btn" data-act="csvgo">Import</button><button class="btn ghost" data-act="closesheet">Cancel</button></div></div>`);
 }
 async function csvFile(ev){
-  const f=ev.target.files&&ev.target.files[0];ev.target.value='';if(!f)return;
-  try{
-    const b=csvBuild(await f.text());
-    b.map={};Object.keys(b.names).forEach(k=>{b.map[k]=b.names[k].map?'e:'+b.names[k].map:'s'});
-    UI.csv=b;csvSheet();
-  }catch(e){toast(e&&e.message?e.message:'Could not read that file')}
+  const files=[...(ev.target.files||[])];ev.target.value='';if(!files.length)return;
+  const c={groups:[],names:{},files:[],map:{},unit:U(),bad:0,rowsOk:0,dupFiles:0},seen=new Set();
+  for(const f of files){
+    try{
+      const sheets=/\.xlsx?$/i.test(f.name)?await xlsxSheets(f):[{rows:parseCSV(await f.text())}];
+      let n=0,err='';
+      sheets.forEach(sh=>{
+        try{
+          const b=csvBuild(sh.rows);
+          b.groups.forEach(g=>{if(seen.has(g.key)){c.dupFiles++;return}seen.add(g.key);c.groups.push(g);n++});
+          Object.keys(b.names).forEach(k=>{const o=c.names[k]=c.names[k]||{sets:0,hint:b.names[k].hint};o.sets+=b.names[k].sets;if(!o.hint)o.hint=b.names[k].hint});
+          c.bad+=b.bad;c.rowsOk+=b.rowsOk;
+        }catch(e){if(!err)err=e&&e.message||'unreadable'}
+      });
+      c.files.push(n?{name:f.name,ok:true,workouts:n}:{name:f.name,ok:false,msg:err||'nothing to import'});
+    }catch(e){c.files.push({name:f.name,ok:false,msg:e&&e.message?e.message:'could not be read'})}
+  }
+  if(!c.groups.length){toast(c.files.length===1?'Could not import '+c.files[0].name+': '+c.files[0].msg:'None of those files could be imported');return}
+  Object.keys(c.names).forEach(k=>{const d=csvDefault(k,c.names[k]);c.names[k].matched=d.matched;c.map[k]=d.sel});
+  UI.csv=c;csvSheet();
 }
 function csvImport(){
   const c=UI.csv;if(!c)return;
@@ -1495,25 +1552,26 @@ function csvImport(){
     if(!made[ck]){const x={id:'c-'+uid(),n:k.slice(0,60),e:'machine',p:[mu],s:[],pat:'custom-'+mu,u:'reps',g:GRP[mu],custom:true};S.app.custom.push(x);made[ck]=x.id}
     return made[ck];
   };
+  const DOW=['mon','tue','wed','thu','fri','sat','sun'];
   const have=new Set(S.sessions.map(s=>s.id));let added=0,dup=0,sets=0;
   c.groups.forEach(g=>{
     const id='csv-'+g.dk+'-'+g.name.toLowerCase().replace(/[^a-z0-9]+/g,'-').slice(0,40);
     if(have.has(id)){dup++;return}
-    const byId={},ex=[];
+    const unit=g.u||c.unit,byId={},ex=[];
     g.ex.forEach(e=>{
       const xid=resolve(e.name);if(!xid)return;
       const x=getEx(xid);
       const ss=e.sets.map(s=>{
-        let r=s.r;if(r<0)r=x.u==='min'?Math.round(-r/60):-r;
-        const w=c.unit==='lb'?s.w/LB:s.w;
-        return {w,r:Math.round(r*100)/100,wu:!!s.wu};
+        let r=s.r;if(r<0)r=x.u==='min'?Math.round(-r/60*10)/10:-r;
+        return {w:unit==='lb'?s.w/LB:s.w,r:Math.round(r*100)/100,wu:!!s.wu};
       }).filter(s=>s.r>0||s.w>0);
       if(!ss.length)return;
       if(byId[xid]){byId[xid].sets.push(...ss)}else{byId[xid]={id:xid,sets:ss};ex.push(byId[xid])}
     });
     if(!ex.length)return;
-    const rt=S.app.routines.find(r=>r.name.toLowerCase()===g.name.toLowerCase());
-    const s={id,t:g.t,dur:0,name:g.name,routineId:rt?rt.id:null,csv:true,ex};
+    const ln=g.name.toLowerCase(),di=DOW.findIndex(d=>ln.startsWith(d));
+    const rt=S.app.routines.find(r=>r.name.toLowerCase()===ln)||(di>=0?S.app.routines.find(r=>r.day===di):null);
+    const s={id,t:g.t,dur:g.dur||0,name:g.name,routineId:rt?rt.id:null,csv:true,ex};
     S.sessions.push(s);Store.saveSession(s);added++;ex.forEach(e=>e.sets.forEach(x=>{if(!x.wu)sets++}));
   });
   sortS();Store.saveApp();Store.saveLocal();UI.csv=null;closeSheet();render();
@@ -1522,7 +1580,6 @@ function csvImport(){
 document.addEventListener('change',ev=>{
   const t=ev.target;
   if(t&&t.dataset&&t.dataset.csvmap!=null&&UI.csv){UI.csv.map[t.dataset.csvmap]=t.value;
-    // refresh only the skipped-sets note by re-rendering the sheet while keeping scroll
     const sc=$('#sheetbody').parentElement.scrollTop;csvSheet();$('#sheetbody').parentElement.scrollTop=sc}
 });
 
